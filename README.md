@@ -208,5 +208,4 @@ MIT License — free to use, modify, and distribute.
 ---
 
 ## Author
-
-Built for [Master Builders Association of King and Snohomish Counties (MBAKS)](https://www.mbaks.com) IT administration.
+Russ Vanover
