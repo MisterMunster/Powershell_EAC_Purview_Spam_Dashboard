@@ -412,12 +412,22 @@ $btnTrace.Add_Click({
                     Log "Sender address from trace: $($t.SenderAddress)" $textSec
                 }
 
+                # Proofpoint relay ranges to skip (keep scanning for the real source behind them)
+                $excludedRanges = '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|67\.231\.)'
+
                 foreach ($d in $details) {
                     # Check Data field for IPs
                     $searchText = "$($d.Data) $($d.Detail)"
                     if ($searchText -match '(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})') {
                         $ip = $Matches[1]
-                        if ($ip -notin $allIPs -and $ip -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)'  -and $ip -ne '127.0.0.1') {
+                        if ($ip -eq '127.0.0.1') { continue }
+                        if ($ip -match $excludedRanges) {
+                            if ($ip -match '^67\.231\.') {
+                                Log "Skipped Proofpoint relay hop: $ip - continuing scan..." $textSec
+                            }
+                            continue
+                        }
+                        if ($ip -notin $allIPs) {
                             $allIPs += $ip
                             Log "Found IP in details: $ip" $accentAmb
                         }
