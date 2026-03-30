@@ -394,7 +394,7 @@ $btnTrace.Add_Click({
         Log "Querying Exchange (V2 API)..." $textSec
         $allTraces = @(Get-MessageTraceV2 @params)
         Log "Total messages pulled: $($allTraces.Count) - filtering by subject..." $textSec
-        $traces = $allTraces | Where-Object { $_.Subject -like "*$subj*" }
+        $traces = @($allTraces | Where-Object { $_.Subject -like "*$subj*" })
 
         if (-not $traces -or $traces.Count -eq 0) {
             StatusMsg "No messages found matching that subject." $accentAmb
@@ -407,6 +407,7 @@ $btnTrace.Add_Click({
         Log "$($traces.Count) messages found. Fetching sender IPs..." $textSec
 
         $allIPs = @()
+        $msgIndex = 0
         foreach ($t in ($traces | Select-Object -First 20)) {
             try {
                 # Try V2 detail first, fall back to original
@@ -449,12 +450,13 @@ $btnTrace.Add_Click({
                 }
 
                 # Log raw detail for first message so we can see the structure
-                if ($traces.IndexOf($t) -eq 0 -and $details) {
+                if ($msgIndex -eq 0 -and $details) {
                     $first = $details | Select-Object -First 3
                     foreach ($d in $first) {
                         Log "Detail sample: Event=$($d.Event) Data=$($d.Data)" $textSec
                     }
                 }
+                $msgIndex++
             } catch {
                 Log "Detail error: $_" $accentRed
             }
