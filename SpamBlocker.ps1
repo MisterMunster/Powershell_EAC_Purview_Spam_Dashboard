@@ -28,6 +28,7 @@ $script:detectedIP  = $null
 $script:blockRange  = $null
 $script:abuseEmail  = $null
 $script:whoisData   = $null
+$script:lastTraces  = @()
 
 # --- HELPERS ---
 function Make-Label($text, $x, $y, $w, $h, $font=$fontUI, $color=$textPri) {
@@ -228,6 +229,10 @@ $btnSelectIP = Make-Button "Use This IP" 375 191 100 22 $bgCard $accent
 $btnSelectIP.Font = $fontSm
 $p2.Controls.Add($btnSelectIP)
 
+$btnParseHeaders = Make-Button "Parse Headers" 490 191 150 22 $bgCard $accentAmb
+$btnParseHeaders.Font = $fontSm
+$p2.Controls.Add($btnParseHeaders)
+
 # --- STEP 3 - BLOCK ---
 $p3 = Make-Panel 14 478 752 170 $bgPanel
 $form.Controls.Add($p3)
@@ -389,6 +394,7 @@ $btnTrace.Add_Click({
             return
         }
 
+        $script:lastTraces = @($traces)
         $script:lblTraceCount.Text = "$($traces.Count) message(s) found"
         Log "$($traces.Count) messages found. Fetching sender IPs..." $textSec
 
@@ -465,6 +471,128 @@ $btnTrace.Add_Click({
 
 $btnSelectIP.Add_Click({
     if ($script:cmbIPs.SelectedItem) { Set-IPInfo $script:cmbIPs.SelectedItem }
+})
+
+$btnParseHeaders.Add_Click({
+    if (-not $script:connected) { StatusMsg "Connect to Exchange Online first." $accentRed; return }
+    if (-not $script:lastTraces -or $script:lastTraces.Count -eq 0) {
+        StatusMsg "Run a message trace first." $accentRed; return
+    }
+    StatusMsg "Fetching message headers..." $accentAmb
+    Log "Parsing headers for source IP (checking X-Originating-IP, X-Forwarded-For, Received chain)..." $textSec
+
+    $t = $script:lastTraces[0]
+    try {
+        $details = $null
+        try {
+            $details = @(Get-MessageTraceDetailV2 -MessageTraceId $t.MessageTraceId `
+                         -RecipientAddress $t.RecipientAddress -ErrorAction Stop)
+        } catch {
+            try {
+                $details = @(Get-MessageTraceDetail -MessageTraceId $t.MessageTraceId `
+                             -RecipientAddress $t.RecipientAddress -ErrorAction Stop)
+            } catch {}
+        }
+
+        if (-not $details -or $details.Count -eq 0) {
+            StatusMsg "No detail events returned for that message." $accentAmb
+            Log "No events found - cannot parse headers." $accentAmb
+            return
+        }
+
+        $blob = ($details | ForEach-Object { "$($_.Data) $($_.Detail)" }) -join " "
+        Log "Scanned $($details.Count) events ($($blob.Length) chars) for header IPs." $textSec
+
+        $found = [System.Collections.Generic.List[string]]::new()
+
+        # X-Originating-IP
+        if ($blob -match 'X-Originating-IP[:\s]+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})') {
+            $found.Add("X-Originating-IP  : $($Matches[1])")
+            Log "X-Originating-IP: $($Matches[1])" $accentAmb
+        }
+
+        # X-Forwarded-For
+        $xffHits = [regex]::Matches($blob, 'X-Forwarded-For[:\s]+([\d\.,\s]+)')
+        foreach ($m in $xffHits) {
+            $innerIPs = [regex]::Matches($m.Groups[1].Value, '\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+            foreach ($ipM in $innerIPs) {
+                $found.Add("X-Forwarded-For   : $($ipM.Value)")
+                Log "X-Forwarded-For: $($ipM.Value)" $accentAmb
+            }
+        }
+
+        # Received: chain
+        $rcvHits = [regex]::Matches($blob, 'Received[:\s]+[^\d]*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
+        foreach ($m in $rcvHits) {
+            $ip = $m.Groups[1].Value
+            if ($ip -ne '127.0.0.1') {
+                $found.Add("Received header   : $ip")
+                Log "Received header IP: $ip" $accentAmb
+            }
+        }
+
+        if ($found.Count -eq 0) {
+            StatusMsg "No IPs found in headers - Proofpoint may have stripped them." $accentAmb
+            Log "No header IPs found. Source IP likely stripped by Proofpoint before Exchange handoff." $accentAmb
+            [System.Windows.Forms.MessageBox]::Show(
+                "No source IPs were found in the message header events.`n`n" +
+                "Proofpoint may have stripped the originating IP before handoff to Exchange.`n`n" +
+                "To find the real source, examine the raw email's Received: headers directly`n" +
+                "by downloading the .eml from Quarantine or asking the recipient to forward`n" +
+                "the message as an attachment.",
+                "Header Parse - No IPs Found",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Information)
+            return
+        }
+
+        # Build selection dialog
+        $dlg = New-Object System.Windows.Forms.Form
+        $dlg.Text = "Header IPs - $($t.Subject)"
+        $dlg.Size = [System.Drawing.Size]::new(500, 310)
+        $dlg.StartPosition = "CenterScreen"
+        $dlg.BackColor = $bgDark
+        $dlg.ForeColor = $textPri
+        $dlg.FormBorderStyle = "FixedDialog"
+        $dlg.MaximizeBox = $false
+
+        $dlg.Controls.Add((Make-Label "IPs extracted from message headers:" 12 10 470 20 $fontUIB $accent))
+        $dlg.Controls.Add((Make-Label "Select an entry and click Use Selected IP to load it into the HUD." 12 32 470 16 $fontSm $textSec))
+
+        $lb = New-Object System.Windows.Forms.ListBox
+        $lb.Location = [System.Drawing.Point]::new(12, 56)
+        $lb.Size = [System.Drawing.Size]::new(462, 170)
+        $lb.BackColor = $bgCard
+        $lb.ForeColor = $textPri
+        $lb.Font = $fontMono
+        $lb.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        foreach ($item in $found) { $lb.Items.Add($item) | Out-Null }
+        $lb.SelectedIndex = 0
+        $dlg.Controls.Add($lb)
+
+        $btnUse   = Make-Button "Use Selected IP" 12 238 160 32 $accent $textPri
+        $btnClose = Make-Button "Close" 184 238 80 32 $bgCard $textSec
+        $dlg.Controls.Add($btnUse)
+        $dlg.Controls.Add($btnClose)
+
+        $btnUse.Add_Click({
+            if ($lb.SelectedItem) {
+                $raw = $lb.SelectedItem.ToString()
+                if ($raw -match '(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})') {
+                    Set-IPInfo $Matches[1]
+                    $dlg.Close()
+                }
+            }
+        })
+        $btnClose.Add_Click({ $dlg.Close() })
+
+        StatusMsg "Header parse complete - $($found.Count) IP(s) found." $accentGrn
+        $dlg.ShowDialog() | Out-Null
+
+    } catch {
+        StatusMsg "Header parse error: $_" $accentRed
+        Log "Header parse error: $_" $accentRed
+    }
 })
 
 $btnCopyAbuse.Add_Click({
