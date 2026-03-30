@@ -29,6 +29,7 @@ $script:blockRange  = $null
 $script:abuseEmail  = $null
 $script:whoisData   = $null
 $script:lastTraces  = @()
+$script:senderDomain = $null
 
 # --- HELPERS ---
 function Make-Label($text, $x, $y, $w, $h, $font=$fontUI, $color=$textPri) {
@@ -122,7 +123,7 @@ function Get-AbuseEmail($ip) {
 # --- MAIN FORM ---
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "SpamBlocker - Exchange Online"
-$form.Size = [System.Drawing.Size]::new(780, 840)
+$form.Size = [System.Drawing.Size]::new(780, 872)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = $bgDark
 $form.ForeColor = $textPri
@@ -242,7 +243,7 @@ $btnLookupIP.Font = $fontSm
 $p2.Controls.Add($btnLookupIP)
 
 # --- STEP 3 - BLOCK ---
-$p3 = Make-Panel 14 478 752 170 $bgPanel
+$p3 = Make-Panel 14 478 752 202 $bgPanel
 $form.Controls.Add($p3)
 $p3.Controls.Add((Make-Label "STEP 3 - Block IP Range" 12 10 500 20 $fontUIB $accent))
 
@@ -281,14 +282,23 @@ $btnBlockBoth.Font = $fontUIB
 $p3.Controls.Add($btnBlockBoth)
 $p3.Controls.Add((Make-Label "Blocks in EXO connection filter AND Purview DLP simultaneously." 225 136 500 18 $fontSm $textSec))
 
+# Row 5: Domain block
+$p3.Controls.Add((Make-Label "Sender domain:" 12 170 110 20))
+$script:txtBlockDomain = Make-TextBox 125 167 255 22 $true
+$p3.Controls.Add($script:txtBlockDomain)
+$btnBlockDomain  = Make-Button "Block Domain"  390 163 140 26 $accentRed $textPri
+$btnUnblockDomain = Make-Button "Revert Domain" 540 163 148 26 $bgCard $accentAmb
+$p3.Controls.Add($btnBlockDomain)
+$p3.Controls.Add($btnUnblockDomain)
+
 # --- STATUS BAR ---
-$pStatus = Make-Panel 0 656 780 30 $bgCard
+$pStatus = Make-Panel 0 688 780 30 $bgCard
 $form.Controls.Add($pStatus)
 $script:lblStatus = Make-Label "Ready. Connect to Exchange Online to begin." 10 6 750 18 $fontSm $textSec
 $pStatus.Controls.Add($script:lblStatus)
 
 # --- LOG ---
-$pLog = Make-Panel 14 692 752 100 $bgPanel
+$pLog = Make-Panel 14 724 752 100 $bgPanel
 $form.Controls.Add($pLog)
 $script:txtLog = New-Object System.Windows.Forms.RichTextBox
 $script:txtLog.Location = [System.Drawing.Point]::new(0, 0)
@@ -425,6 +435,10 @@ $btnTrace.Add_Click({
                 # Also check SenderAddress field directly on the trace record
                 if ($t.SenderAddress -and $t.SenderAddress -notmatch '@mbaks') {
                     Log "Sender address from trace: $($t.SenderAddress)" $textSec
+                    if ($msgIndex -eq 0 -and $t.SenderAddress -match '@(.+)$') {
+                        $script:senderDomain = $Matches[1]
+                        $script:txtBlockDomain.Text = $script:senderDomain
+                    }
                 }
 
                 # Proofpoint relay ranges to skip (keep scanning for the real source behind them)
@@ -809,6 +823,60 @@ $btnBlockBoth.Add_Click({
         StatusMsg "Blocked in Purview only - EXO failed. Check log." $accentAmb
     } else {
         StatusMsg "Both blocks failed. Check log." $accentRed
+    }
+})
+
+$btnBlockDomain.Add_Click({
+    if (-not $script:connected) { StatusMsg "Connect to Exchange Online first." $accentRed; return }
+    $domain = $script:txtBlockDomain.Text.Trim()
+    if ([string]::IsNullOrEmpty($domain)) { StatusMsg "No sender domain specified." $accentRed; return }
+    $confirm = [System.Windows.Forms.MessageBox]::Show(
+        "Block all mail from sender domain:`n$domain`n`nCreates an EXO transport rule to reject messages from this domain.`n`nContinue?",
+        "Confirm Domain Block", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($confirm -ne "Yes") { return }
+    try {
+        StatusMsg "Creating transport rule to block $domain..." $accentAmb
+        $ruleName = "SpamBlocker: Block $domain"
+        New-TransportRule -Name $ruleName `
+            -SenderDomainIs $domain `
+            -RejectMessageReasonText "Your message was rejected by the recipient organization." `
+            -RejectMessageEnhancedStatusCode "5.7.1" `
+            -Enabled $true `
+            -ErrorAction Stop
+        Log "BLOCKED sender domain via transport rule: $domain" $accentRed
+        StatusMsg "Domain blocked: $domain" $accentGrn
+    } catch {
+        Log "Domain block error: $_" $accentRed
+        StatusMsg "Domain block failed. Check log." $accentRed
+    }
+})
+
+$btnUnblockDomain.Add_Click({
+    if (-not $script:connected) { StatusMsg "Connect to Exchange Online first." $accentRed; return }
+    $domain = $script:txtBlockDomain.Text.Trim()
+    if ([string]::IsNullOrEmpty($domain)) { StatusMsg "No sender domain specified." $accentRed; return }
+    $confirm = [System.Windows.Forms.MessageBox]::Show(
+        "Remove domain block for:`n$domain`n`nContinue?",
+        "Confirm Domain Revert", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($confirm -ne "Yes") { return }
+    try {
+        StatusMsg "Removing domain block for $domain..." $accentAmb
+        $ruleName = "SpamBlocker: Block $domain"
+        $rule = Get-TransportRule -Identity $ruleName -ErrorAction SilentlyContinue
+        if (-not $rule) {
+            $rule = Get-TransportRule | Where-Object { $_.SenderDomainIs -contains $domain } | Select-Object -First 1
+        }
+        if ($rule) {
+            Remove-TransportRule -Identity $rule.Identity -Confirm:$false -ErrorAction Stop
+            Log "REVERTED domain block: $domain" $accentGrn
+            StatusMsg "Domain block removed: $domain" $accentGrn
+        } else {
+            StatusMsg "No block rule found for domain: $domain" $accentAmb
+            Log "No transport rule found for domain: $domain" $accentAmb
+        }
+    } catch {
+        Log "Domain revert error: $_" $accentRed
+        StatusMsg "Domain revert failed. Check log." $accentRed
     }
 })
 
