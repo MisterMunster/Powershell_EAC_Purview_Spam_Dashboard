@@ -276,11 +276,14 @@ $p3.Controls.Add($btnBlockDLP)
 $btnUnblockDLP = Make-Button "Revert from Purview" 558 93 175 26 $bgCard $accentAmb
 $p3.Controls.Add($btnUnblockDLP)
 
-# Row 4: Block both
+# Row 4: Block both + Manage
 $btnBlockBoth = Make-Button "BLOCK IN BOTH" 12 130 200 30 $accentRed $textPri
 $btnBlockBoth.Font = $fontUIB
 $p3.Controls.Add($btnBlockBoth)
-$p3.Controls.Add((Make-Label "Blocks in EXO connection filter AND Purview DLP simultaneously." 225 136 500 18 $fontSm $textSec))
+$p3.Controls.Add((Make-Label "Blocks EXO + Purview simultaneously." 220 136 230 18 $fontSm $textSec))
+$btnManageBlockList = Make-Button "Manage Block List" 460 130 200 30 $bgCard $accentAmb
+$btnManageBlockList.Font = $fontUIB
+$p3.Controls.Add($btnManageBlockList)
 
 # Row 5: Domain block
 $p3.Controls.Add((Make-Label "Sender domain:" 12 170 110 20))
@@ -877,6 +880,123 @@ $btnUnblockDomain.Add_Click({
     } catch {
         Log "Domain revert error: $_" $accentRed
         StatusMsg "Domain revert failed. Check log." $accentRed
+    }
+})
+
+$btnManageBlockList.Add_Click({
+    if (-not $script:connected) { StatusMsg "Connect to Exchange Online first." $accentRed; return }
+    StatusMsg "Loading block lists..." $accentAmb
+
+    try {
+        $policy     = $script:txtPolicy.Text.Trim()
+        $dlpRule    = $script:txtDLPRule.Text.Trim()
+        $exoRanges  = @()
+        $dlpRanges  = @()
+
+        try {
+            $cf = Get-HostedConnectionFilterPolicy -Identity $policy -ErrorAction Stop
+            $exoRanges = @($cf.IPBlockList)
+        } catch { Log "Could not read EXO block list: $_" $accentAmb }
+
+        try {
+            $rule = Get-DlpComplianceRule -Identity $dlpRule -ErrorAction Stop
+            $dlpRanges = @($rule.SenderIPRanges)
+        } catch { Log "Could not read Purview block list: $_" $accentAmb }
+
+        Log "EXO blocked ranges: $($exoRanges.Count)  |  Purview blocked ranges: $($dlpRanges.Count)" $textSec
+
+        # Build dialog
+        $dlg = New-Object System.Windows.Forms.Form
+        $dlg.Text = "Manage Block List"
+        $dlg.Size = [System.Drawing.Size]::new(580, 460)
+        $dlg.StartPosition = "CenterScreen"
+        $dlg.BackColor = $bgDark
+        $dlg.ForeColor = $textPri
+        $dlg.FormBorderStyle = "FixedDialog"
+        $dlg.MaximizeBox = $false
+
+        $dlg.Controls.Add((Make-Label "EXO Connection Filter Block List  ($($exoRanges.Count) entries)" 12 10 540 20 $fontUIB $accent))
+        $lbEXO = New-Object System.Windows.Forms.ListBox
+        $lbEXO.Location  = [System.Drawing.Point]::new(12, 34)
+        $lbEXO.Size      = [System.Drawing.Size]::new(540, 130)
+        $lbEXO.BackColor = $bgCard
+        $lbEXO.ForeColor = $textPri
+        $lbEXO.Font      = $fontMono
+        $lbEXO.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        foreach ($r in $exoRanges) { $lbEXO.Items.Add($r) | Out-Null }
+        $dlg.Controls.Add($lbEXO)
+
+        $btnRemoveEXO = Make-Button "Remove Selected from EXO" 12 172 220 26 $accentRed $textPri
+        $btnRemoveEXO.Font = $fontSm
+        $dlg.Controls.Add($btnRemoveEXO)
+
+        $dlg.Controls.Add((Make-Label "Purview DLP Blocked Ranges  ($($dlpRanges.Count) entries)" 12 212 540 20 $fontUIB $accent))
+        $lbDLP = New-Object System.Windows.Forms.ListBox
+        $lbDLP.Location  = [System.Drawing.Point]::new(12, 234)
+        $lbDLP.Size      = [System.Drawing.Size]::new(540, 130)
+        $lbDLP.BackColor = $bgCard
+        $lbDLP.ForeColor = $textPri
+        $lbDLP.Font      = $fontMono
+        $lbDLP.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        foreach ($r in $dlpRanges) { $lbDLP.Items.Add($r) | Out-Null }
+        $dlg.Controls.Add($lbDLP)
+
+        $btnRemoveDLP = Make-Button "Remove Selected from Purview" 12 372 230 26 $accentRed $textPri
+        $btnRemoveDLP.Font = $fontSm
+        $dlg.Controls.Add($btnRemoveDLP)
+
+        $btnClose = Make-Button "Close" 480 406 80 26 $bgCard $textSec
+        $btnClose.Font = $fontSm
+        $dlg.Controls.Add($btnClose)
+
+        $btnRemoveEXO.Add_Click({
+            $sel = $lbEXO.SelectedItem
+            if (-not $sel) { return }
+            $confirm = [System.Windows.Forms.MessageBox]::Show(
+                "Remove from EXO block list:`n$sel`n`nContinue?", "Confirm Remove",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($confirm -ne "Yes") { return }
+            try {
+                Set-HostedConnectionFilterPolicy -Identity $policy -IPBlockList @{Remove=$sel} -ErrorAction Stop
+                $lbEXO.Items.Remove($sel)
+                Log "REMOVED from EXO block list: $sel" $accentGrn
+                StatusMsg "Removed from EXO: $sel" $accentGrn
+            } catch {
+                Log "EXO remove error: $_" $accentRed
+                StatusMsg "Remove failed. Check log." $accentRed
+            }
+        })
+
+        $btnRemoveDLP.Add_Click({
+            $sel = $lbDLP.SelectedItem
+            if (-not $sel) { return }
+            $confirm = [System.Windows.Forms.MessageBox]::Show(
+                "Remove from Purview DLP:`n$sel`n`nContinue?", "Confirm Remove",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($confirm -ne "Yes") { return }
+            try {
+                $currentRule = Get-DlpComplianceRule -Identity $dlpRule -ErrorAction Stop
+                $newList = $currentRule.SenderIPRanges | Where-Object { $_ -ne $sel }
+                Set-DlpComplianceRule -Identity $dlpRule -SenderIPRanges $newList -Confirm:$false -ErrorAction Stop
+                $lbDLP.Items.Remove($sel)
+                Log "REMOVED from Purview DLP: $sel" $accentGrn
+                StatusMsg "Removed from Purview: $sel" $accentGrn
+            } catch {
+                Log "Purview remove error: $_" $accentRed
+                StatusMsg "Remove failed. Check log." $accentRed
+            }
+        })
+
+        $btnClose.Add_Click({ $dlg.Close() })
+
+        StatusMsg "Block list loaded. EXO: $($exoRanges.Count) | Purview: $($dlpRanges.Count)" $accentGrn
+        $dlg.ShowDialog() | Out-Null
+
+    } catch {
+        StatusMsg "Block list load error: $_" $accentRed
+        Log "Block list error: $_" $accentRed
     }
 })
 
