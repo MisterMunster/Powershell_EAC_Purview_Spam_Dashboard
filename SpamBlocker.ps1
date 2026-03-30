@@ -233,6 +233,14 @@ $btnParseHeaders = Make-Button "Parse Headers" 490 191 150 22 $bgCard $accentAmb
 $btnParseHeaders.Font = $fontSm
 $p2.Controls.Add($btnParseHeaders)
 
+$p2.Controls.Add((Make-Label "Manual IP:" 12 220 72 18 $fontSm $textSec))
+$script:txtManualIP = Make-TextBox 87 217 200 22 $true
+$script:txtManualIP.Font = $fontMono
+$p2.Controls.Add($script:txtManualIP)
+$btnLookupIP = Make-Button "Look Up" 295 217 90 22 $bgCard $accent
+$btnLookupIP.Font = $fontSm
+$p2.Controls.Add($btnLookupIP)
+
 # --- STEP 3 - BLOCK ---
 $p3 = Make-Panel 14 478 752 170 $bgPanel
 $form.Controls.Add($p3)
@@ -593,6 +601,23 @@ $btnParseHeaders.Add_Click({
         StatusMsg "Header parse error: $_" $accentRed
         Log "Header parse error: $_" $accentRed
     }
+})
+
+# Shared lookup logic so both the button and Enter key call the same path
+function Invoke-ManualIPLookup {
+    $ip = $script:txtManualIP.Text.Trim()
+    if ($ip -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+        Log "Manual IP entry: $ip" $textSec
+        Set-IPInfo $ip
+    } else {
+        StatusMsg "Enter a valid IPv4 address (e.g. 203.0.113.45)." $accentRed
+    }
+}
+
+$btnLookupIP.Add_Click({ Invoke-ManualIPLookup })
+
+$script:txtManualIP.Add_KeyDown({
+    if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Return) { Invoke-ManualIPLookup }
 })
 
 $btnCopyAbuse.Add_Click({
