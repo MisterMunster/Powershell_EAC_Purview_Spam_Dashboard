@@ -658,24 +658,96 @@ $btnReportAbuse.Add_Click({
     $email = $script:abuseEmail
     $org   = if ($script:whoisData -and $script:whoisData.org) { $script:whoisData.org } else { "your network" }
     if (-not $ip) { StatusMsg "No IP selected." $accentRed; return }
+
+    # Build header block from trace detail events
+    $headerBlock = ""
+    if ($script:connected -and $script:lastTraces -and $script:lastTraces.Count -gt 0) {
+        try {
+            $t = $script:lastTraces[0]
+            $details = $null
+            try {
+                $details = @(Get-MessageTraceDetailV2 -MessageTraceId $t.MessageTraceId `
+                             -RecipientAddress $t.RecipientAddress -ErrorAction Stop)
+            } catch {
+                try {
+                    $details = @(Get-MessageTraceDetail -MessageTraceId $t.MessageTraceId `
+                                 -RecipientAddress $t.RecipientAddress -ErrorAction Stop)
+                } catch {}
+            }
+
+            if ($details) {
+                $wantedFields = @('ClientIP','ServerHostName','ProxiedClientIPAddress',
+                                  'ProxiedClientHostname','OriginalFromAddress','ReturnPath',
+                                  'ConnectorId','InboundConnectorData')
+                $lines = @(
+                    "--- Message Trace Headers ---",
+                    "Message-ID : $($t.MessageId)",
+                    "From       : $($t.SenderAddress)",
+                    "To         : $($t.RecipientAddress)",
+                    "Received   : $($t.Received)",
+                    "Subject    : $($t.Subject)",
+                    ""
+                )
+                foreach ($d in ($details | Where-Object { $_.Event -in @('Receive','Transfer','Submit') })) {
+                    $lines += "Event: $($d.Event)"
+                    try {
+                        [xml]$xml = $d.Data
+                        foreach ($mep in $xml.root.MEP) {
+                            if ($mep.Name -in $wantedFields) {
+                                $val = if ($mep.String) { $mep.String } `
+                                       elseif ($mep.Blob) { $mep.Blob } `
+                                       else { $null }
+                                if ($val) { $lines += "  $($mep.Name): $val" }
+                            }
+                        }
+                    } catch {
+                        $lines += "  (raw) $($d.Data)"
+                    }
+                    $lines += ""
+                }
+                $headerBlock = $lines -join "`n"
+                Log "Header block built: $($headerBlock.Length) chars" $textSec
+            }
+        } catch {
+            Log "Could not fetch headers for abuse report: $_" $accentAmb
+        }
+    }
+
     $to      = if ($email) { $email } else { "" }
     $subject = [uri]::EscapeDataString("Abuse Report: Spam from $ip")
-    $body    = [uri]::EscapeDataString(
-"Dear Abuse Team,
+
+    $baseBody = "Dear Abuse Team,
 
 I am writing to report spam email originating from IP address $ip ($org).
 
-This IP has been sending unsolicited commercial email that bypasses mail filters.
+IP Address   : $ip
+Block Range  : $($script:blockRange)
+Sender Domain: $($script:senderDomain)
+Date Reported: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC
+Subject      : $($script:txtSubject.Text)
 
-IP Address:    $ip
-Block Range:   $($script:blockRange)
-Date Reported: $(Get-Date -Format 'yyyy-MM-dd HH:mm UTC')
-Subject Pattern: $($script:txtSubject.Text)
-
-Please investigate and take appropriate action.
+"
+    $closing = "Please investigate and take appropriate action.
 
 Regards"
-    )
+
+    # Fit headers inline if URL stays under 1900 chars; otherwise copy to clipboard
+    $fullBody  = $baseBody + $headerBlock + "`n" + $closing
+    $encodedFull = [uri]::EscapeDataString($fullBody)
+
+    if ($encodedFull.Length -le 1900) {
+        $body = $encodedFull
+        if ($headerBlock) { Log "Headers included inline in abuse report." $textSec }
+    } else {
+        if ($headerBlock) {
+            [System.Windows.Forms.Clipboard]::SetText($headerBlock)
+            Log "Header block copied to clipboard (too long for mailto)." $accentAmb
+            StatusMsg "Headers copied to clipboard - paste into email body after it opens." $accentAmb
+        }
+        $clipNote = if ($headerBlock) { "[Message headers copied to clipboard - paste here]`n`n" } else { "" }
+        $body = [uri]::EscapeDataString($baseBody + $clipNote + $closing)
+    }
+
     Start-Process "mailto:${to}?subject=$subject&body=$body"
     Log "Opened abuse report email to: $to" $accentAmb
 })
