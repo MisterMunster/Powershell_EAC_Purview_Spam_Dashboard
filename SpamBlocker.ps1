@@ -444,8 +444,9 @@ $btnTrace.Add_Click({
                     }
                 }
 
-                # Proofpoint relay ranges to skip (keep scanning for the real source behind them)
-                $excludedRanges = '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|67\.231\.)'
+                # Known relay/infrastructure ranges to skip (keep scanning for the real source)
+                # RFC1918 private | Proofpoint Essentials | Amazon SES sending ranges
+                $excludedRanges = '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|67\.231\.|148\.163\.|54\.240\.|54\.241\.|23\.249\.|23\.251\.)'
 
                 foreach ($d in $details) {
                     # Check Data field for IPs
@@ -456,6 +457,8 @@ $btnTrace.Add_Click({
                         if ($ip -match $excludedRanges) {
                             if ($ip -match '^67\.231\.') {
                                 Log "Skipped Proofpoint relay hop: $ip - continuing scan..." $textSec
+                            } elseif ($ip -match '^(148\.163\.|54\.240\.|54\.241\.|23\.249\.|23\.251\.)') {
+                                Log "Skipped Amazon SES relay hop: $ip - continuing scan..." $textSec
                             }
                             continue
                         }
