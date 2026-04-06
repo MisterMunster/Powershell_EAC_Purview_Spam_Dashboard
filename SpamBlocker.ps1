@@ -758,43 +758,82 @@ Regards"
 $btnIPHistory.Add_Click({
     if (-not $script:connected) { StatusMsg "Connect to Exchange Online first." $accentRed; return }
 
-    # Pre-fill from Step 1 subject, let user edit before committing
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = "Block by Subject"
-    $dlg.Size = [System.Drawing.Size]::new(500, 160)
+    $dlg.Size = [System.Drawing.Size]::new(500, 220)
     $dlg.StartPosition = "CenterScreen"
     $dlg.BackColor = $bgDark
     $dlg.ForeColor = $textPri
     $dlg.FormBorderStyle = "FixedDialog"
     $dlg.MaximizeBox = $false
 
-    $dlg.Controls.Add((Make-Label "Reject any message whose subject contains:" 12 10 470 18 $fontSm $textSec))
-    $txtSubjBlock = Make-TextBox 12 32 462 22
+    $dlg.Controls.Add((Make-Label "Subject text / pattern:" 12 10 200 18 $fontSm $textSec))
+    $txtSubjBlock = Make-TextBox 12 30 462 22
     $txtSubjBlock.Text = $script:txtSubject.Text.Trim()
     $txtSubjBlock.Font = $fontMono
     $dlg.Controls.Add($txtSubjBlock)
-    $dlg.Controls.Add((Make-Label "Creates an EXO transport rule (5.7.1 reject). Editable before confirming." 12 58 470 16 $fontSm $textSec))
 
-    $btnOK     = Make-Button "Block Subject" 12 84 160 30 $accentRed $textPri
-    $btnCancel = Make-Button "Cancel" 184 84 80 30 $bgCard $textSec
+    $dlg.Controls.Add((Make-Label "Match type:" 12 62 80 18 $fontSm $textSec))
+    $cmbMatchType = New-Object System.Windows.Forms.ComboBox
+    $cmbMatchType.Location  = [System.Drawing.Point]::new(96, 59)
+    $cmbMatchType.Size      = [System.Drawing.Size]::new(378, 22)
+    $cmbMatchType.BackColor = $bgCard
+    $cmbMatchType.ForeColor = $textPri
+    $cmbMatchType.Font      = $fontUI
+    $cmbMatchType.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $cmbMatchType.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cmbMatchType.Items.Add("Subject Contains  (SubjectContainsWords)")         | Out-Null
+    $cmbMatchType.Items.Add("Subject or Body Contains  (SubjectOrBodyContainsWords)") | Out-Null
+    $cmbMatchType.Items.Add("Exact Subject Match  (SubjectMatchesPatterns - anchored)") | Out-Null
+    $cmbMatchType.Items.Add("Subject Regex  (SubjectMatchesPatterns - raw)")    | Out-Null
+    $cmbMatchType.SelectedIndex = 0
+    $dlg.Controls.Add($cmbMatchType)
+
+    $lblHint = Make-Label "Matches if the subject contains the word or phrase anywhere. Case-insensitive." 12 88 462 16 $fontSm $textSec
+    $dlg.Controls.Add($lblHint)
+
+    $cmbMatchType.Add_SelectedIndexChanged({
+        $hints = @(
+            "Matches if the subject contains the word or phrase anywhere. Case-insensitive.",
+            "Same as above but also scans the message body.",
+            "Wraps your text in ^...$ for an exact full-subject match. Case-insensitive.",
+            "Raw regex pattern applied to the subject line. Use .* for wildcards."
+        )
+        $lblHint.Text = $hints[$cmbMatchType.SelectedIndex]
+    })
+
+    $dlg.Controls.Add((Make-Label "Creates an EXO transport rule (5.7.1 reject)." 12 110 462 16 $fontSm $textSec))
+
+    $btnOK     = Make-Button "Block Subject" 12 140 160 32 $accentRed $textPri
+    $btnCancel = Make-Button "Cancel" 184 140 80 32 $bgCard $textSec
     $dlg.Controls.Add($btnOK)
     $dlg.Controls.Add($btnCancel)
 
     $btnOK.Add_Click({
         $subj = $txtSubjBlock.Text.Trim()
         if ([string]::IsNullOrEmpty($subj)) { return }
+        $matchIdx = $cmbMatchType.SelectedIndex
         $dlg.Close()
         try {
             StatusMsg "Creating subject block rule..." $accentAmb
             $ruleName = "SpamBlocker: Block subject - $subj"
-            New-TransportRule -Name $ruleName `
-                -SubjectContainsWords $subj `
-                -RejectMessageReasonText "Your message was rejected by the recipient organization." `
-                -RejectMessageEnhancedStatusCode "5.7.1" `
-                -Enabled $true `
-                -ErrorAction Stop
-            Log "BLOCKED by subject via transport rule: '$subj'" $accentRed
-            StatusMsg "Subject block active: '$subj'" $accentGrn
+            $ruleParams = @{
+                Name                          = $ruleName
+                RejectMessageReasonText       = "Your message was rejected by the recipient organization."
+                RejectMessageEnhancedStatusCode = "5.7.1"
+                Enabled                       = $true
+                ErrorAction                   = "Stop"
+            }
+            switch ($matchIdx) {
+                0 { $ruleParams.SubjectContainsWords    = $subj }
+                1 { $ruleParams.SubjectOrBodyContainsWords = $subj }
+                2 { $ruleParams.SubjectMatchesPatterns  = "^$([regex]::Escape($subj))$" }
+                3 { $ruleParams.SubjectMatchesPatterns  = $subj }
+            }
+            New-TransportRule @ruleParams
+            $matchLabel = @("Contains","Subject/Body Contains","Exact Match","Regex")[$matchIdx]
+            Log "BLOCKED by subject [$matchLabel] via transport rule: '$subj'" $accentRed
+            StatusMsg "Subject block active [$matchLabel]: '$subj'" $accentGrn
         } catch {
             Log "Subject block error: $_" $accentRed
             StatusMsg "Subject block failed. Check log." $accentRed
