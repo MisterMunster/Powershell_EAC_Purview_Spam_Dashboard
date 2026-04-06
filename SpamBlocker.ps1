@@ -210,7 +210,7 @@ $p2.Controls.Add($btnCopyAbuse)
 $btnReportAbuse = Make-Button "Report Abuse" 12 150 150 34 $bgCard $accentAmb
 $p2.Controls.Add($btnReportAbuse)
 
-$btnIPHistory = Make-Button "Check AbuseIPDB" 172 150 150 34 $bgCard $textSec
+$btnIPHistory = Make-Button "Block Subject" 172 150 150 34 $bgCard $accentRed
 $p2.Controls.Add($btnIPHistory)
 
 $btnCopyIP = Make-Button "Copy IP" 332 150 90 34 $bgCard $textSec
@@ -756,10 +756,52 @@ Regards"
 })
 
 $btnIPHistory.Add_Click({
-    if ($script:detectedIP) {
-        Start-Process "https://www.abuseipdb.com/check/$($script:detectedIP)"
-        Log "Opened AbuseIPDB for $($script:detectedIP)" $textSec
-    }
+    if (-not $script:connected) { StatusMsg "Connect to Exchange Online first." $accentRed; return }
+
+    # Pre-fill from Step 1 subject, let user edit before committing
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Block by Subject"
+    $dlg.Size = [System.Drawing.Size]::new(500, 160)
+    $dlg.StartPosition = "CenterScreen"
+    $dlg.BackColor = $bgDark
+    $dlg.ForeColor = $textPri
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox = $false
+
+    $dlg.Controls.Add((Make-Label "Reject any message whose subject contains:" 12 10 470 18 $fontSm $textSec))
+    $txtSubjBlock = Make-TextBox 12 32 462 22
+    $txtSubjBlock.Text = $script:txtSubject.Text.Trim()
+    $txtSubjBlock.Font = $fontMono
+    $dlg.Controls.Add($txtSubjBlock)
+    $dlg.Controls.Add((Make-Label "Creates an EXO transport rule (5.7.1 reject). Editable before confirming." 12 58 470 16 $fontSm $textSec))
+
+    $btnOK     = Make-Button "Block Subject" 12 84 160 30 $accentRed $textPri
+    $btnCancel = Make-Button "Cancel" 184 84 80 30 $bgCard $textSec
+    $dlg.Controls.Add($btnOK)
+    $dlg.Controls.Add($btnCancel)
+
+    $btnOK.Add_Click({
+        $subj = $txtSubjBlock.Text.Trim()
+        if ([string]::IsNullOrEmpty($subj)) { return }
+        $dlg.Close()
+        try {
+            StatusMsg "Creating subject block rule..." $accentAmb
+            $ruleName = "SpamBlocker: Block subject - $subj"
+            New-TransportRule -Name $ruleName `
+                -SubjectContainsWords $subj `
+                -RejectMessageReasonText "Your message was rejected by the recipient organization." `
+                -RejectMessageEnhancedStatusCode "5.7.1" `
+                -Enabled $true `
+                -ErrorAction Stop
+            Log "BLOCKED by subject via transport rule: '$subj'" $accentRed
+            StatusMsg "Subject block active: '$subj'" $accentGrn
+        } catch {
+            Log "Subject block error: $_" $accentRed
+            StatusMsg "Subject block failed. Check log." $accentRed
+        }
+    })
+    $btnCancel.Add_Click({ $dlg.Close() })
+    $dlg.ShowDialog() | Out-Null
 })
 
 # Helper: Block in EXO Connection Filter
@@ -967,6 +1009,7 @@ $btnManageBlockList.Add_Click({
         $dlpRule    = $script:txtDLPRule.Text.Trim()
         $exoRanges  = @()
         $dlpRanges  = @()
+        $sbRules    = @()
 
         try {
             $cf = Get-HostedConnectionFilterPolicy -Identity $policy -ErrorAction Stop
@@ -978,12 +1021,16 @@ $btnManageBlockList.Add_Click({
             $dlpRanges = @($rule.SenderIPRanges)
         } catch { Log "Could not read Purview block list: $_" $accentAmb }
 
-        Log "EXO blocked ranges: $($exoRanges.Count)  |  Purview blocked ranges: $($dlpRanges.Count)" $textSec
+        try {
+            $sbRules = @(Get-TransportRule | Where-Object { $_.Name -like "SpamBlocker:*" })
+        } catch { Log "Could not read transport rules: $_" $accentAmb }
+
+        Log "EXO: $($exoRanges.Count) | Purview: $($dlpRanges.Count) | Transport rules: $($sbRules.Count)" $textSec
 
         # Build dialog
         $dlg = New-Object System.Windows.Forms.Form
         $dlg.Text = "Manage Block List"
-        $dlg.Size = [System.Drawing.Size]::new(580, 460)
+        $dlg.Size = [System.Drawing.Size]::new(580, 640)
         $dlg.StartPosition = "CenterScreen"
         $dlg.BackColor = $bgDark
         $dlg.ForeColor = $textPri
@@ -993,7 +1040,7 @@ $btnManageBlockList.Add_Click({
         $dlg.Controls.Add((Make-Label "EXO Connection Filter Block List  ($($exoRanges.Count) entries)" 12 10 540 20 $fontUIB $accent))
         $lbEXO = New-Object System.Windows.Forms.ListBox
         $lbEXO.Location  = [System.Drawing.Point]::new(12, 34)
-        $lbEXO.Size      = [System.Drawing.Size]::new(540, 130)
+        $lbEXO.Size      = [System.Drawing.Size]::new(540, 110)
         $lbEXO.BackColor = $bgCard
         $lbEXO.ForeColor = $textPri
         $lbEXO.Font      = $fontMono
@@ -1001,14 +1048,14 @@ $btnManageBlockList.Add_Click({
         foreach ($r in $exoRanges) { $lbEXO.Items.Add($r) | Out-Null }
         $dlg.Controls.Add($lbEXO)
 
-        $btnRemoveEXO = Make-Button "Remove Selected from EXO" 12 172 220 26 $accentRed $textPri
+        $btnRemoveEXO = Make-Button "Remove Selected from EXO" 12 152 220 26 $accentRed $textPri
         $btnRemoveEXO.Font = $fontSm
         $dlg.Controls.Add($btnRemoveEXO)
 
-        $dlg.Controls.Add((Make-Label "Purview DLP Blocked Ranges  ($($dlpRanges.Count) entries)" 12 212 540 20 $fontUIB $accent))
+        $dlg.Controls.Add((Make-Label "Purview DLP Blocked Ranges  ($($dlpRanges.Count) entries)" 12 192 540 20 $fontUIB $accent))
         $lbDLP = New-Object System.Windows.Forms.ListBox
-        $lbDLP.Location  = [System.Drawing.Point]::new(12, 234)
-        $lbDLP.Size      = [System.Drawing.Size]::new(540, 130)
+        $lbDLP.Location  = [System.Drawing.Point]::new(12, 214)
+        $lbDLP.Size      = [System.Drawing.Size]::new(540, 110)
         $lbDLP.BackColor = $bgCard
         $lbDLP.ForeColor = $textPri
         $lbDLP.Font      = $fontMono
@@ -1016,11 +1063,26 @@ $btnManageBlockList.Add_Click({
         foreach ($r in $dlpRanges) { $lbDLP.Items.Add($r) | Out-Null }
         $dlg.Controls.Add($lbDLP)
 
-        $btnRemoveDLP = Make-Button "Remove Selected from Purview" 12 372 230 26 $accentRed $textPri
+        $btnRemoveDLP = Make-Button "Remove Selected from Purview" 12 332 230 26 $accentRed $textPri
         $btnRemoveDLP.Font = $fontSm
         $dlg.Controls.Add($btnRemoveDLP)
 
-        $btnClose = Make-Button "Close" 480 406 80 26 $bgCard $textSec
+        $dlg.Controls.Add((Make-Label "SpamBlocker Transport Rules - domain and subject blocks  ($($sbRules.Count) entries)" 12 372 540 20 $fontUIB $accent))
+        $lbRules = New-Object System.Windows.Forms.ListBox
+        $lbRules.Location  = [System.Drawing.Point]::new(12, 394)
+        $lbRules.Size      = [System.Drawing.Size]::new(540, 110)
+        $lbRules.BackColor = $bgCard
+        $lbRules.ForeColor = $textPri
+        $lbRules.Font      = $fontMono
+        $lbRules.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+        foreach ($r in $sbRules) { $lbRules.Items.Add($r.Name) | Out-Null }
+        $dlg.Controls.Add($lbRules)
+
+        $btnRemoveRule = Make-Button "Remove Selected Rule" 12 512 200 26 $accentRed $textPri
+        $btnRemoveRule.Font = $fontSm
+        $dlg.Controls.Add($btnRemoveRule)
+
+        $btnClose = Make-Button "Close" 480 572 80 26 $bgCard $textSec
         $btnClose.Font = $fontSm
         $dlg.Controls.Add($btnClose)
 
@@ -1064,9 +1126,28 @@ $btnManageBlockList.Add_Click({
             }
         })
 
+        $btnRemoveRule.Add_Click({
+            $sel = $lbRules.SelectedItem
+            if (-not $sel) { return }
+            $confirm = [System.Windows.Forms.MessageBox]::Show(
+                "Remove transport rule:`n$sel`n`nContinue?", "Confirm Remove",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($confirm -ne "Yes") { return }
+            try {
+                Remove-TransportRule -Identity $sel -Confirm:$false -ErrorAction Stop
+                $lbRules.Items.Remove($sel)
+                Log "REMOVED transport rule: $sel" $accentGrn
+                StatusMsg "Rule removed: $sel" $accentGrn
+            } catch {
+                Log "Rule remove error: $_" $accentRed
+                StatusMsg "Rule remove failed. Check log." $accentRed
+            }
+        })
+
         $btnClose.Add_Click({ $dlg.Close() })
 
-        StatusMsg "Block list loaded. EXO: $($exoRanges.Count) | Purview: $($dlpRanges.Count)" $accentGrn
+        StatusMsg "Block list loaded. EXO: $($exoRanges.Count) | Purview: $($dlpRanges.Count) | Rules: $($sbRules.Count)" $accentGrn
         $dlg.ShowDialog() | Out-Null
 
     } catch {
