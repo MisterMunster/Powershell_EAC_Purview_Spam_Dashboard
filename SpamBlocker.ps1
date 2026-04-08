@@ -843,17 +843,38 @@ $btnIPHistory.Add_Click({
     $dlg.ShowDialog() | Out-Null
 })
 
-# Helper: Block in EXO Connection Filter
-function Do-BlockEXO($range, $policy) {
+# Helper: run Enable-OrganizationCustomization if EXO requires it, then retry the scriptblock
+function Invoke-EXOWithCustomization([scriptblock]$Action) {
     try {
-        StatusMsg "Adding $range to EXO connection filter..." $accentAmb
-        Set-HostedConnectionFilterPolicy -Identity $policy -IPBlockList @{Add=$range} -ErrorAction Stop
-        Log "BLOCKED in EXO [$policy]: $range" $accentRed
+        & $Action
         return $true
     } catch {
-        Log "EXO block error: $_" $accentRed
+        if ($_ -match 'Enable-OrganizationCustomization') {
+            Log "EXO org not customized - running Enable-OrganizationCustomization..." $accentAmb
+            StatusMsg "Enabling org customization (one-time)..." $accentAmb
+            try {
+                Enable-OrganizationCustomization -ErrorAction Stop
+                Log "OrganizationCustomization enabled. Retrying..." $accentAmb
+                & $Action
+                return $true
+            } catch {
+                Log "EXO error after customization: $_" $accentRed
+                return $false
+            }
+        }
+        Log "EXO error: $_" $accentRed
         return $false
     }
+}
+
+# Helper: Block in EXO Connection Filter
+function Do-BlockEXO($range, $policy) {
+    StatusMsg "Adding $range to EXO connection filter..." $accentAmb
+    $ok = Invoke-EXOWithCustomization {
+        Set-HostedConnectionFilterPolicy -Identity $policy -IPBlockList @{Add=$range} -ErrorAction Stop
+        Log "BLOCKED in EXO [$policy]: $range" $accentRed
+    }
+    return $ok
 }
 
 # Helper: Revert from EXO Connection Filter
