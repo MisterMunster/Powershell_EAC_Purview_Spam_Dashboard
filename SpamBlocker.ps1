@@ -420,6 +420,7 @@ $btnTrace.Add_Click({
         Log "$($traces.Count) messages found. Fetching sender IPs..." $textSec
 
         $allIPs = @()
+        $skippedHops = @()
         $msgIndex = 0
         foreach ($t in ($traces | Select-Object -First 20)) {
             try {
@@ -445,30 +446,44 @@ $btnTrace.Add_Click({
                 }
 
                 # Known relay/infrastructure ranges to skip (keep scanning for the real source)
-                # RFC1918 private | Proofpoint Essentials | Amazon SES sending ranges
-                $excludedRanges = '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|67\.231\.|148\.163\.|54\.240\.|54\.241\.|23\.249\.|23\.251\.)'
+                # Ordered - the first pattern that matches supplies the log label.
+                $relayHops = @(
+                    @{ Label = 'RFC1918 private';  Pattern = '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)' }
+                    @{ Label = 'loopback';         Pattern = '^127\.' }
+                    @{ Label = 'link-local';       Pattern = '^169\.254\.' }
+                    @{ Label = 'Proofpoint relay'; Pattern = '^(67\.231\.|148\.163\.)' }
+                    @{ Label = 'Amazon SES relay'; Pattern = '^(54\.240\.|54\.241\.|23\.249\.|23\.251\.)' }
+                )
+
+                # NOTE: -match returns only the FIRST match in a string. A trace detail record
+                # carries the whole hop chain, so every IP in it must be scanned - otherwise a
+                # leading relay hop hides the originating IP sitting further down the same record.
+                $ipPattern = '(?<!\d)((?:\d{1,3}\.){3}\d{1,3})(?!\d)'
 
                 foreach ($d in $details) {
-                    # Check Data field for IPs
+                    # Check Data/Detail fields for IPs
                     $searchText = "$($d.Data) $($d.Detail)"
-                    if ($searchText -match '(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})') {
-                        $ip = $Matches[1]
-                        if ($ip -eq '127.0.0.1') { continue }
-                        if ($ip -match $excludedRanges) {
-                            if ($ip -match '^67\.231\.') {
-                                Log "Skipped Proofpoint relay hop: $ip - continuing scan..." $textSec
-                            } elseif ($ip -match '^(148\.163\.|54\.240\.|54\.241\.|23\.249\.|23\.251\.)') {
-                                Log "Skipped Amazon SES relay hop: $ip - continuing scan..." $textSec
+                    foreach ($m in [regex]::Matches($searchText, $ipPattern)) {
+                        $ip = $m.Groups[1].Value
+
+                        # Reject malformed dotted-quads (build/version strings, e.g. 15.20.900.1)
+                        if (@($ip -split '\.' | Where-Object { [int]$_ -gt 255 }).Count -gt 0) { continue }
+
+                        $hop = $relayHops | Where-Object { $ip -match $_.Pattern } | Select-Object -First 1
+                        if ($hop) {
+                            if ($ip -notin $skippedHops) {
+                                $skippedHops += $ip
+                                Log "Skipped $($hop.Label) hop: $ip - continuing scan..." $textSec
                             }
                             continue
                         }
+
                         if ($ip -notin $allIPs) {
                             $allIPs += $ip
                             Log "Found IP in details: $ip" $accentAmb
                         }
                     }
                 }
-
                 # Log raw detail for first message so we can see the structure
                 if ($msgIndex -eq 0 -and $details) {
                     $first = $details | Select-Object -First 3
@@ -491,7 +506,12 @@ $btnTrace.Add_Click({
             StatusMsg "Trace complete. $($allIPs.Count) unique sender IP(s) found." $accentGrn
         } else {
             StatusMsg "Messages found but could not extract external sender IP." $accentAmb
-            Log "Could not extract IPs from trace details." $accentAmb
+            if ($skippedHops.Count -gt 0) {
+                Log "Only relay/infrastructure hops were present: $($skippedHops -join ', ')" $accentAmb
+                Log "The originating IP was stripped before Exchange. Try 'Parse Headers'." $accentAmb
+            } else {
+                Log "Could not extract IPs from trace details." $accentAmb
+            }
         }
     } catch {
         StatusMsg "Trace error: $_" $accentRed
