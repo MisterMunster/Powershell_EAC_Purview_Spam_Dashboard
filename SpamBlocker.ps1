@@ -421,6 +421,7 @@ $btnTrace.Add_Click({
 
         $allIPs = @()
         $skippedHops = @()
+        $script:senderDomain = $null
         $msgIndex = 0
         foreach ($t in ($traces | Select-Object -First 20)) {
             try {
@@ -436,12 +437,21 @@ $btnTrace.Add_Click({
                     } catch {}
                 }
 
-                # Also check SenderAddress field directly on the trace record
-                if ($t.SenderAddress -and $t.SenderAddress -notmatch '@mbaks') {
-                    Log "Sender address from trace: $($t.SenderAddress)" $textSec
-                    if ($msgIndex -eq 0 -and $t.SenderAddress -match '@(.+)$') {
+                # Internal copies (journal/report, self-sends) carry Microsoft infrastructure
+                # IPs unrelated to the spam - keep them out of the scan entirely.
+                $isInternal = $t.SenderAddress -match '@mbaks'
+                if ($isInternal) {
+                    Log "Skipping internal message from $($t.SenderAddress)" $textSec
+                    $msgIndex++
+                    continue
+                }
+                if ($t.SenderAddress) {
+                    Log "External sender: $($t.SenderAddress)" $textSec
+                    # First EXTERNAL sender wins - msgIndex 0 is often an internal copy.
+                    if (-not $script:senderDomain -and $t.SenderAddress -match '@(.+)$') {
                         $script:senderDomain = $Matches[1]
                         $script:txtBlockDomain.Text = $script:senderDomain
+                        Log "Sender domain: $($script:senderDomain)" $accentAmb
                     }
                 }
 
@@ -449,12 +459,17 @@ $btnTrace.Add_Click({
                 # Ordered - the first pattern that matches supplies the log label.
                 $relayHops = @(
                     @{ Label = 'RFC1918 private';  Pattern = '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)' }
-                    @{ Label = 'loopback';         Pattern = '^127\.' }
-                    @{ Label = 'link-local';       Pattern = '^169\.254\.' }
+                    @{ Label = 'loopback';         Pattern = '^(127\.|::1$)' }
+                    @{ Label = 'link-local';       Pattern = '^(169\.254\.|[Ff][Ee]80:)' }
+                    @{ Label = 'Microsoft/EOP';    Pattern = '^(2603:|2a01:111:|104\.47\.)' }
                     @{ Label = 'Proofpoint relay'; Pattern = '^(67\.231\.|148\.163\.)' }
                     @{ Label = 'Amazon SES relay'; Pattern = '^(54\.240\.|54\.241\.|23\.249\.|23\.251\.)' }
                 )
 
+                # ClientIP is the authoritative "who actually connected to Exchange" field.
+                # Prefer it - a blind scan of the blob picks up whatever IP happens to appear
+                # first. It can be IPv6, which the IPv4 fallback pattern cannot match.
+                $clientIPPattern = 'Name="(?:Proxied)?ClientIP(?:Address)?"\s+String="([^"]+)"'
                 # NOTE: -match returns only the FIRST match in a string. A trace detail record
                 # carries the whole hop chain, so every IP in it must be scanned - otherwise a
                 # leading relay hop hides the originating IP sitting further down the same record.
@@ -463,11 +478,23 @@ $btnTrace.Add_Click({
                 foreach ($d in $details) {
                     # Check Data/Detail fields for IPs
                     $searchText = "$($d.Data) $($d.Detail)"
-                    foreach ($m in [regex]::Matches($searchText, $ipPattern)) {
-                        $ip = $m.Groups[1].Value
+
+                    $candidates = @()
+                    foreach ($cm in [regex]::Matches($searchText, $clientIPPattern)) {
+                        $candidates += $cm.Groups[1].Value
+                    }
+                    if ($candidates.Count -eq 0) {
+                        foreach ($m in [regex]::Matches($searchText, $ipPattern)) {
+                            $candidates += $m.Groups[1].Value
+                        }
+                    }
+
+                    foreach ($ip in $candidates) {
+                        $ip = $ip.Trim()
 
                         # Reject malformed dotted-quads (build/version strings, e.g. 15.20.900.1)
-                        if (@($ip -split '\.' | Where-Object { [int]$_ -gt 255 }).Count -gt 0) { continue }
+                        if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$' -and
+                            @($ip -split '\.' | Where-Object { [int]$_ -gt 255 }).Count -gt 0) { continue }
 
                         $hop = $relayHops | Where-Object { $ip -match $_.Pattern } | Select-Object -First 1
                         if ($hop) {
@@ -505,10 +532,20 @@ $btnTrace.Add_Click({
             Set-IPInfo $allIPs[0]
             StatusMsg "Trace complete. $($allIPs.Count) unique sender IP(s) found." $accentGrn
         } else {
-            StatusMsg "Messages found but could not extract external sender IP." $accentAmb
+            StatusMsg "No origin IP in trace - gateway relayed this mail. Block by domain." $accentAmb
             if ($skippedHops.Count -gt 0) {
                 Log "Only relay/infrastructure hops were present: $($skippedHops -join ', ')" $accentAmb
-                Log "The originating IP was stripped before Exchange. Try 'Parse Headers'." $accentAmb
+                $gw = $skippedHops | Where-Object { $_ -match '^(67\.231\.|148\.163\.)' }
+                if ($gw) {
+                    Log "Your mail gateway ($($gw -join ', ')) is the connecting host, so Exchange" $accentAmb
+                    Log "never sees the true origin. DO NOT block that IP - it carries all inbound mail." $accentRed
+                }
+                if ($script:senderDomain) {
+                    Log "Recommended: block the sender domain '$($script:senderDomain)' (Step 3)," $accentGrn
+                    Log "or use 'Parse Headers' to read the origin from the Received: chain." $accentGrn
+                } else {
+                    Log "Recommended: use 'Parse Headers' to read the origin from the Received: chain." $accentGrn
+                }
             } else {
                 Log "Could not extract IPs from trace details." $accentAmb
             }
